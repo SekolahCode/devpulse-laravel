@@ -6,8 +6,8 @@
   "keywords": ["laravel", "error-tracking", "monitoring", "logging", "devpulse"],
   "authors": [
     {
-      "name": "DevPulse",
-      "email": "hello@devpulse.io"
+      "name": "SekolahCode",
+      "homepage": "https://github.com/SekolahCode"
     }
   ],
   "autoload": {
@@ -20,15 +20,9 @@
       "DevPulse\\Laravel\\Tests\\": "tests/"
     }
   },
-  "repositories": [
-    {
-      "type": "path",
-      "url": "/Users/shukri/Projects/devpulse-php"
-    }
-  ],
   "require": {
     "php": "^8.1",
-    "devpulse/core": "*",
+    "devpulse/core": "^0.1",
     "illuminate/support": "^10.0|^11.0|^12.0"
   },
   "require-dev": {
