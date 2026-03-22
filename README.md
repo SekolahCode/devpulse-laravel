@@ -1,12 +1,6 @@
-# devpulse/laravel
+# DevPulse Laravel SDK
 
-Laravel SDK for DevPulse — automatic error tracking, slow query detection, and queue failure capture for Laravel applications.
-
-## Requirements
-
-- PHP 8.1+
-- Laravel 10, 11, or 12
-- A running DevPulse server
+Real-time error tracking for Laravel — self-hosted and free.
 
 ## Installation
 
@@ -14,59 +8,145 @@ Laravel SDK for DevPulse — automatic error tracking, slow query detection, and
 composer require devpulse/laravel
 ```
 
-The service provider is auto-discovered. No manual registration needed.
-
-## Configuration
-
-Publish the config file:
+Publish the config:
 
 ```bash
 php artisan vendor:publish --tag=devpulse-config
 ```
 
-Add your DSN to `.env`:
+## Configuration
+
+Add to `.env`:
 
 ```env
-DEVPULSE_DSN=http://localhost:8000/api/ingest/YOUR_API_KEY
-DEVPULSE_ENABLED=true
+DEVPULSE_DSN=https://your-devpulse-server.com/api/ingest/your-api-key
+DEVPULSE_ENV=production
+DEVPULSE_RELEASE=1.4.2        # or set APP_VERSION — falls back to git SHA
 ```
 
-### All Config Options
+### All options
 
-| Variable                  | Default       | Description                                          |
-|---------------------------|---------------|------------------------------------------------------|
-| `DEVPULSE_DSN`            | —             | Ingest endpoint URL including your API key           |
-| `DEVPULSE_ENABLED`        | `true`        | Enable / disable the SDK globally                    |
-| `DEVPULSE_ASYNC`          | `true`        | Fire-and-forget HTTP transport (non-blocking)        |
-| `DEVPULSE_TIMEOUT`        | `2`           | HTTP timeout in seconds                              |
-| `DEVPULSE_SLOW_QUERY_MS`  | `1000`        | Log DB queries slower than this (ms)                 |
-| `DEVPULSE_SLOW_REQUEST_MS`| `3000`        | Log HTTP requests slower than this (ms)              |
+| Variable | Default | Description |
+|---|---|---|
+| `DEVPULSE_DSN` | — | Ingest URL with API key (required) |
+| `DEVPULSE_ENABLED` | `true` | Master on/off switch |
+| `DEVPULSE_ENV` | `APP_ENV` | Environment name sent with events |
+| `DEVPULSE_RELEASE` | `APP_VERSION` / git SHA | Release/version tag |
+| `DEVPULSE_ASYNC` | `true` | Fire-and-forget HTTP (recommended) |
+| `DEVPULSE_TIMEOUT` | `2` | HTTP timeout in seconds |
+| `DEVPULSE_SAMPLE_RATE` | `1.0` | 0.0–1.0 fraction of events to send |
+| `DEVPULSE_SLOW_QUERY_MS` | `1000` | Slow query threshold (ms) |
+| `DEVPULSE_SLOW_REQUEST_MS` | `3000` | Slow request threshold (ms) |
+| `DEVPULSE_MIN_LOG_LEVEL` | `error` | Minimum log level to capture |
+| `DEVPULSE_USER_CONTEXT` | `true` | Attach auth user to events |
 
-## What Gets Captured
+### Capture toggles
 
-By default the SDK captures:
+| Variable | Default | Description |
+|---|---|---|
+| `DEVPULSE_CAPTURE_EXCEPTIONS` | `true` | Unhandled exceptions |
+| `DEVPULSE_CAPTURE_LOGS` | `true` | `Log::error()` / `Log::critical()` |
+| `DEVPULSE_CAPTURE_SLOW_QUERIES` | `true` | Slow DB queries |
+| `DEVPULSE_CAPTURE_SLOW_REQUESTS` | `true` | Slow HTTP requests (requires middleware) |
+| `DEVPULSE_CAPTURE_QUEUE_FAILURES` | `true` | Failed queue jobs |
+| `DEVPULSE_CAPTURE_COMMANDS` | `true` | Artisan command failures (non-zero exit) |
 
-- **Unhandled exceptions** — via Laravel's exception handler
-- **Slow DB queries** — queries exceeding `DEVPULSE_SLOW_QUERY_MS`
-- **Slow HTTP requests** — requests exceeding `DEVPULSE_SLOW_REQUEST_MS`
-- **Queue job failures** — failed jobs with their exception context
+## What's captured automatically
 
-These can be toggled individually in `config/devpulse.php` under the `capture` key.
+- **Exceptions** — All unhandled exceptions (excluding ignored list)
+- **Log::error / critical** — Laravel log entries at `error` level or above
+- **Slow queries** — DB queries exceeding the threshold, plus all queries as breadcrumbs
+- **Slow requests** — HTTP requests exceeding the threshold (add middleware)
+- **Queue failures** — Failed jobs with queue, job class, and attempt count
+- **Artisan failures** — Commands that exit with a non-zero code
+- **User context** — Authenticated user ID, email, name (auto-detected)
+- **Release** — Version tag from `DEVPULSE_RELEASE`, `APP_VERSION`, or git SHA
+- **Breadcrumbs** — Last 20 queries and log entries attached to exceptions
 
-## Manual Capture
+## Ignored exceptions
+
+The following are never reported by default (add more in `config/devpulse.php`):
+
+- `ValidationException`
+- `AuthenticationException`
+- `AuthorizationException`
+- `ModelNotFoundException`
+- `NotFoundHttpException`
+- `ThrottleRequestsException`
+- `TokenMismatchException`
+
+## Slow request middleware
+
+Register in `app/Http/Kernel.php` (Laravel 10) or `bootstrap/app.php` (Laravel 11+):
+
+```php
+// Laravel 10 — app/Http/Kernel.php
+protected $middleware = [
+    \DevPulse\Laravel\Http\Middleware\DevPulseContext::class,
+];
+
+// Laravel 11 — bootstrap/app.php
+->withMiddleware(function (Middleware $middleware) {
+    $middleware->append(\DevPulse\Laravel\Http\Middleware\DevPulseContext::class);
+})
+```
+
+## Manual capture
 
 ```php
 use DevPulse\Laravel\DevPulseFacade as DevPulse;
 
+// Capture an exception manually
 try {
     riskyOperation();
 } catch (\Throwable $e) {
-    DevPulse::captureException($e);
+    DevPulse::capture($e, ['order_id' => $orderId]);
+    throw $e;
 }
 
-DevPulse::captureMessage('Quota limit approaching', 'warning');
+// Capture a message
+DevPulse::captureMessage('Payment gateway timeout', 'warning', [
+    'gateway'     => 'stripe',
+    'amount'      => $amount,
+    'customer_id' => $customerId,
+]);
+```
+
+## Testing
+
+Use `DevPulse::fake()` to assert events in tests without hitting the server:
+
+```php
+use DevPulse\Laravel\DevPulseFacade as DevPulse;
+
+public function test_order_failure_is_tracked(): void
+{
+    $fake = DevPulse::fake();
+
+    $this->post('/orders', ['invalid' => 'data']);
+
+    $fake->assertCaptured(\App\Exceptions\PaymentFailedException::class);
+}
+
+public function test_slow_payment_is_reported(): void
+{
+    $fake = DevPulse::fake();
+
+    // ... trigger slow payment ...
+
+    $fake->assertCapturedMessage('Slow request');
+}
+
+public function test_healthy_request_sends_nothing(): void
+{
+    $fake = DevPulse::fake();
+
+    $this->get('/health');
+
+    $fake->assertNothingCaptured();
+}
 ```
 
 ## License
 
-MIT — see [LICENSE](../../LICENSE)
+MIT

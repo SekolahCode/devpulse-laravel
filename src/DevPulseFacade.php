@@ -2,10 +2,14 @@
 
 namespace DevPulse\Laravel;
 
+use DevPulse\Core\Client;
 use Illuminate\Support\Facades\Facade;
 
 /**
+ * @method static void capture(\Throwable $e, array $extra = [])
  * @method static void captureMessage(string $message, string $level = 'info', array $extra = [])
+ *
+ * @see Client
  */
 class DevPulseFacade extends Facade
 {
@@ -15,17 +19,18 @@ class DevPulseFacade extends Facade
     }
 
     /**
-     * Capture an exception.
+     * Replace the bound client with a FakeClient for testing.
+     * Records all captured events so you can assert on them.
      *
-     * Aliases Client::captureException() to match the core DevPulse static API,
-     * so DevPulse::capture($e) works the same way in Laravel as in plain PHP.
-     *
-     * @param array<string, mixed> $extra
+     * Usage in tests:
+     *   $fake = DevPulse::fake();
+     *   // ... trigger something ...
+     *   $fake->assertCaptured(\RuntimeException::class);
      */
-    public static function capture(\Throwable $e, array $extra = []): void
+    public static function fake(): FakeClient
     {
-        $root = static::getFacadeRoot();
-        assert($root instanceof \DevPulse\Client);
-        $root->captureException($e, $extra);
+        $fake = new FakeClient();
+        static::swap($fake);
+        return $fake;
     }
 }
