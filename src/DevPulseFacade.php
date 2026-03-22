@@ -2,7 +2,7 @@
 
 namespace DevPulse\Laravel;
 
-use DevPulse\Core\Client;
+use DevPulse\Client;
 use Illuminate\Support\Facades\Facade;
 
 /**

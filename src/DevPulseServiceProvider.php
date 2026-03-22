@@ -2,7 +2,7 @@
 
 namespace DevPulse\Laravel;
 
-use DevPulse\Core\Client;
+use DevPulse\Client;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
