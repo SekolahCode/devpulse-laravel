@@ -4,6 +4,7 @@ namespace DevPulse\Laravel;
 
 use DevPulse\Client;
 use Illuminate\Console\Events\CommandFinished;
+use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
@@ -72,14 +73,21 @@ class DevPulseServiceProvider extends ServiceProvider
 
     private function registerExceptionCapture(array $config, array &$breadcrumbs): void
     {
-        $ignored     = $config['ignored_exceptions'] ?? [];
-        $sampleRate  = (float) ($config['sample_rate'] ?? 1.0);
-        $userContext = $config['user_context'] ?? true;
+        $ignored        = $config['ignored_exceptions'] ?? [];
+        $sampleRate     = (float) ($config['sample_rate'] ?? 1.0);
+        $userContext    = $config['user_context'] ?? true;
+        $captureCommands = $config['capture']['commands'] ?? true;
 
         $this->callAfterResolving(
             \Illuminate\Contracts\Debug\ExceptionHandler::class,
-            function ($handler) use ($ignored, $sampleRate, $userContext, &$breadcrumbs) {
-                $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, &$breadcrumbs) {
+            function ($handler) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs) {
+                $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs) {
+                    // In console, registerCommandCapture handles exceptions with richer command context.
+                    // Queue worker failures are covered separately by registerQueueFailureCapture.
+                    if ($captureCommands && app()->runningInConsole()) {
+                        return false;
+                    }
+
                     // Ignored exception classes
                     foreach ($ignored as $class) {
                         if ($e instanceof $class) {
@@ -220,26 +228,65 @@ class DevPulseServiceProvider extends ServiceProvider
 
     private function registerCommandCapture(array $config): void
     {
-        $this->app['events']->listen(CommandFinished::class, function (CommandFinished $event) {
+        $lastException = null;
+        $inCommand     = false;
+
+        // Mark when we enter a command so the exception tracker below only fires in command context
+        $this->app['events']->listen(
+            CommandStarting::class,
+            function () use (&$inCommand, &$lastException) {
+                $inCommand     = true;
+                $lastException = null;
+            }
+        );
+
+        // Intercept exceptions that occur while a command is running
+        $this->callAfterResolving(
+            \Illuminate\Contracts\Debug\ExceptionHandler::class,
+            function ($handler) use (&$lastException, &$inCommand) {
+                $handler->reportable(function (Throwable $e) use (&$lastException, &$inCommand) {
+                    if ($inCommand) {
+                        $lastException = $e;
+                    }
+                    return false;
+                });
+            }
+        );
+
+        $this->app['events']->listen(CommandFinished::class, function (CommandFinished $event) use (&$lastException, &$inCommand) {
+            $inCommand = false;
+
             if ($event->exitCode === 0) {
+                $lastException = null;
                 return;
             }
 
             // Skip framework maintenance commands
             $skip = ['up', 'down', 'list', 'help', 'env', 'tinker'];
             if (in_array($event->command, $skip, true)) {
+                $lastException = null;
                 return;
             }
 
-            app('devpulse')->captureMessage(
-                "Artisan command failed: {$event->command}",
-                'error',
-                array_merge($this->buildBaseContext(), [
-                    'command'   => $event->command,
-                    'exit_code' => $event->exitCode,
-                    'input'     => (string) $event->input,
-                ])
-            );
+            $context = array_merge($this->buildBaseContext(), [
+                'command'   => $event->command,
+                'exit_code' => $event->exitCode,
+                'input'     => (string) $event->input,
+            ]);
+
+            if ($lastException !== null) {
+                // Capture with full exception details + command context
+                app('devpulse')->captureException($lastException, $context);
+            } else {
+                // Non-exception failure (e.g. return Command::FAILURE)
+                app('devpulse')->captureMessage(
+                    "Artisan command failed: {$event->command}",
+                    'error',
+                    $context
+                );
+            }
+
+            $lastException = null;
         });
     }
 
