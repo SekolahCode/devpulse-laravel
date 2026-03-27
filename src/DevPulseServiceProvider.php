@@ -84,8 +84,10 @@ class DevPulseServiceProvider extends ServiceProvider
                 $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs) {
                     // In console, registerCommandCapture handles exceptions with richer command context.
                     // Queue worker failures are covered separately by registerQueueFailureCapture.
+                    // Must NOT return false here — that would stop the chain before registerCommandCapture
+                    // can set $lastException.
                     if ($captureCommands && app()->runningInConsole()) {
-                        return false;
+                        return;
                     }
 
                     // Ignored exception classes
@@ -247,8 +249,10 @@ class DevPulseServiceProvider extends ServiceProvider
                 $handler->reportable(function (Throwable $e) use (&$lastException, &$inCommand) {
                     if ($inCommand) {
                         $lastException = $e;
+                        // Suppress default logging — CommandFinished will capture via DevPulse
+                        return false;
                     }
-                    return false;
+                    // Not in a command — don't interfere with other reportable callbacks
                 });
             }
         );
