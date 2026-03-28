@@ -321,20 +321,18 @@ class DevPulseServiceProvider extends ServiceProvider
         }
 
         // HTTP request context (not available in console)
+        // Note: 'request' key is intentionally omitted here — php-core's buildRequest()
+        // owns that key and would overwrite anything set here via array_merge.
+        // Routing is stored separately so it survives the merge.
         if (app()->bound('request') && app('request')->isMethod('get') !== null) {
             $request = app('request');
             $route   = $request->route();
 
-            $ctx['request'] = [
-                'url'     => $request->fullUrl(),
-                'method'  => $request->method(),
-                'ip'      => $request->ip(),
-                'routing' => [
-                    'controller' => optional($route)->getActionName(),
-                    'name'       => optional($route)->getName(),
-                    'middleware' => optional($route)->gatherMiddleware() ?? [],
-                    'parameters' => optional($route)->parameters() ?? [],
-                ],
+            $ctx['routing'] = [
+                'controller' => optional($route)->getActionName(),
+                'name'       => optional($route)->getName(),
+                'middleware' => optional($route)->gatherMiddleware() ?? [],
+                'parameters' => optional($route)->parameters() ?? [],
             ];
         }
 
