@@ -322,12 +322,19 @@ class DevPulseServiceProvider extends ServiceProvider
 
         // HTTP request context (not available in console)
         if (app()->bound('request') && app('request')->isMethod('get') !== null) {
-            $request       = app('request');
+            $request = app('request');
+            $route   = $request->route();
+
             $ctx['request'] = [
-                'url'    => $request->fullUrl(),
-                'method' => $request->method(),
-                'ip'     => $request->ip(),
-                'route'  => optional($request->route())->getName(),
+                'url'     => $request->fullUrl(),
+                'method'  => $request->method(),
+                'ip'      => $request->ip(),
+                'routing' => [
+                    'controller' => optional($route)->getActionName(),
+                    'name'       => optional($route)->getName(),
+                    'middleware' => optional($route)->gatherMiddleware() ?? [],
+                    'parameters' => optional($route)->parameters() ?? [],
+                ],
             ];
         }
 
