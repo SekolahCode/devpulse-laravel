@@ -47,7 +47,7 @@ return [
     | HTTP Timeout (seconds)
     |--------------------------------------------------------------------------
     */
-    'timeout' => env('DEVPULSE_TIMEOUT', 2),
+    'timeout' => (int) env('DEVPULSE_TIMEOUT', 2),
 
     /*
     |--------------------------------------------------------------------------
@@ -70,6 +70,7 @@ return [
         'slow_requests' => env('DEVPULSE_CAPTURE_SLOW_REQUESTS', true),
         'queue_failures'=> env('DEVPULSE_CAPTURE_QUEUE_FAILURES',true),
         'commands'      => env('DEVPULSE_CAPTURE_COMMANDS',      true),  // Artisan failures
+        'livewire'      => env('DEVPULSE_CAPTURE_LIVEWIRE',      true),  // Livewire component actions
     ],
 
     /*
@@ -77,8 +78,9 @@ return [
     | Thresholds
     |--------------------------------------------------------------------------
     */
-    'slow_query_ms'   => env('DEVPULSE_SLOW_QUERY_MS',   1000),
-    'slow_request_ms' => env('DEVPULSE_SLOW_REQUEST_MS', 3000),
+    'slow_query_ms'    => env('DEVPULSE_SLOW_QUERY_MS',    1000),
+    'slow_request_ms'  => env('DEVPULSE_SLOW_REQUEST_MS',  3000),
+    'slow_livewire_ms' => env('DEVPULSE_SLOW_LIVEWIRE_MS',  500),
 
     /*
     |--------------------------------------------------------------------------
@@ -115,9 +117,10 @@ return [
     | Attach recent activity (queries, logs) to exception events.
     */
     'breadcrumbs' => [
-        'queries'  => env('DEVPULSE_BREADCRUMBS_QUERIES', true),
-        'logs'     => env('DEVPULSE_BREADCRUMBS_LOGS',    true),
-        'max'      => env('DEVPULSE_BREADCRUMBS_MAX',     20),
+        'queries'  => env('DEVPULSE_BREADCRUMBS_QUERIES',  true),
+        'logs'     => env('DEVPULSE_BREADCRUMBS_LOGS',     true),
+        'livewire' => env('DEVPULSE_BREADCRUMBS_LIVEWIRE', true),
+        'max'      => env('DEVPULSE_BREADCRUMBS_MAX',      20),
     ],
 
     /*

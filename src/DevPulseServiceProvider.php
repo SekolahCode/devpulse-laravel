@@ -26,7 +26,7 @@ class DevPulseServiceProvider extends ServiceProvider
                 'dsn'     => $enabled ? $dsn : 'http://localhost/noop',
                 'enabled' => $enabled,
                 'async'   => $config['async']   ?? true,
-                'timeout' => $config['timeout'] ?? 2,
+                'timeout' => (int) ($config['timeout'] ?? 2),
             ]);
         });
     }
@@ -46,10 +46,11 @@ class DevPulseServiceProvider extends ServiceProvider
         }
 
         // Breadcrumb buffer (shared across listeners for this request)
-        $breadcrumbs = [];
+        $breadcrumbs     = [];
+        $livewireContext = [];
 
         if ($config['capture']['exceptions'] ?? true) {
-            $this->registerExceptionCapture($config, $breadcrumbs);
+            $this->registerExceptionCapture($config, $breadcrumbs, $livewireContext);
         }
 
         if ($config['capture']['slow_queries'] ?? true) {
@@ -67,11 +68,15 @@ class DevPulseServiceProvider extends ServiceProvider
         if ($config['capture']['commands'] ?? true) {
             $this->registerCommandCapture($config);
         }
+
+        if ($config['capture']['livewire'] ?? true) {
+            $this->registerLivewireCapture($config, $breadcrumbs, $livewireContext);
+        }
     }
 
     // ── Exception capture ────────────────────────────────────────────────────
 
-    private function registerExceptionCapture(array $config, array &$breadcrumbs): void
+    private function registerExceptionCapture(array $config, array &$breadcrumbs, array &$livewireContext): void
     {
         $ignored        = $config['ignored_exceptions'] ?? [];
         $sampleRate     = (float) ($config['sample_rate'] ?? 1.0);
@@ -80,8 +85,8 @@ class DevPulseServiceProvider extends ServiceProvider
 
         $this->callAfterResolving(
             \Illuminate\Contracts\Debug\ExceptionHandler::class,
-            function ($handler) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs) {
-                $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs) {
+            function ($handler) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs, &$livewireContext) {
+                $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, $captureCommands, &$breadcrumbs, &$livewireContext) {
                     // In console, registerCommandCapture handles exceptions with richer command context.
                     // Queue worker failures are covered separately by registerQueueFailureCapture.
                     // Must NOT return false here — that would stop the chain before registerCommandCapture
@@ -115,6 +120,11 @@ class DevPulseServiceProvider extends ServiceProvider
                             $breadcrumbs,
                             -($this->app['config']['devpulse.breadcrumbs.max'] ?? 20)
                         );
+                    }
+
+                    // Livewire component context (populated by registerLivewireCapture)
+                    if (!empty($livewireContext)) {
+                        $extra['livewire'] = $livewireContext;
                     }
 
                     app('devpulse')->captureException($e, $extra);
@@ -294,6 +304,99 @@ class DevPulseServiceProvider extends ServiceProvider
         });
     }
 
+    // ── Livewire component capture ───────────────────────────────────────────
+
+    private function registerLivewireCapture(array $config, array &$breadcrumbs, array &$livewireContext): void
+    {
+        // Livewire is an optional peer dependency — skip silently if absent.
+        if (!class_exists(\Livewire\Livewire::class)) {
+            return;
+        }
+
+        // Guard: Livewire's ServiceProvider must have booted (Octane / test safety).
+        if (!app()->bound(\Livewire\Mechanisms\ComponentRegistry::class)) {
+            return;
+        }
+
+        $threshold   = (int) ($config['slow_livewire_ms'] ?? 500);
+        $trackCrumbs = $config['breadcrumbs']['livewire'] ?? true;
+
+        /** @var array<string, float> $actionTimers  key = "{componentId}::{action}" */
+        $actionTimers = [];
+
+        // Populate context on AJAX updates (component.hydrate).
+        \Livewire\Livewire::listen('component.hydrate', function ($component) use (&$livewireContext): void {
+            $livewireContext['livewire_component'] = $component->getName();
+            $livewireContext['livewire_id']        = $component->getId();
+        });
+
+        // Populate context on initial full-page renders (component.mount).
+        \Livewire\Livewire::listen('component.mount', function ($component) use (&$livewireContext): void {
+            $livewireContext['livewire_component'] = $component->getName();
+            $livewireContext['livewire_id']        = $component->getId();
+        });
+
+        // Record action start time and set action name in shared context.
+        // If action.finish never fires (exception mid-action), livewire_action remains
+        // in $livewireContext so the exception handler can include it automatically.
+        \Livewire\Livewire::listen('action.start', function ($component, $action) use (&$livewireContext, &$actionTimers): void {
+            // Safety valve: prevent unbounded timer growth under persistent workers (Octane).
+            if (count($actionTimers) > 50) {
+                $actionTimers = [];
+            }
+
+            $actionTimers[$component->getId() . '::' . $action] = microtime(true);
+            $livewireContext['livewire_action'] = $action;
+        });
+
+        // Compute duration, record breadcrumb, and report if slow.
+        \Livewire\Livewire::listen('action.finish', function ($component, $action) use (&$livewireContext, &$actionTimers, $threshold, $trackCrumbs, &$breadcrumbs): void {
+            $key = $component->getId() . '::' . $action;
+            $ms  = isset($actionTimers[$key])
+                ? (microtime(true) - $actionTimers[$key]) * 1000
+                : null;
+
+            unset($actionTimers[$key]);
+
+            if ($trackCrumbs) {
+                $breadcrumbs[] = [
+                    'type'      => 'livewire',
+                    'timestamp' => now()->toISOString(),
+                    'category'  => 'livewire',
+                    'message'   => $component->getName() . '::' . $action . '()',
+                    'data'      => array_filter([
+                        'component'   => $component->getName(),
+                        'action'      => $action,
+                        'id'          => $component->getId(),
+                        'duration_ms' => $ms !== null ? round($ms, 2) : null,
+                    ]),
+                    'level'     => ($ms !== null && $ms >= $threshold) ? 'warning' : 'info',
+                ];
+            }
+
+            if ($ms !== null && $ms >= $threshold) {
+                app('devpulse')->captureMessage(
+                    sprintf('Slow Livewire action: %s::%s() (%.0fms)', $component->getName(), $action, $ms),
+                    'warning',
+                    array_merge(
+                        $this->buildBaseContext(),
+                        [
+                            'livewire_component'   => $component->getName(),
+                            'livewire_id'          => $component->getId(),
+                            'livewire_action'      => $action,
+                            'duration_ms'          => round($ms, 2),
+                            'threshold_ms'         => $threshold,
+                            'component_properties' => $this->safeComponentProperties($component),
+                        ]
+                    )
+                );
+            }
+
+            // Clear the in-flight action name now that the action completed normally.
+            unset($livewireContext['livewire_action']);
+        });
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**
@@ -374,5 +477,47 @@ class DevPulseServiceProvider extends ServiceProvider
         } catch (Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Reflect public non-static properties of a Livewire component into a
+     * serialisable snapshot safe to send to DevPulse.
+     *
+     * Intentionally typed as `object` (not a Livewire class) so PHP does not
+     * attempt to autoload Livewire when this method is compiled — it is only
+     * ever called from within the class_exists guard in registerLivewireCapture.
+     */
+    private function safeComponentProperties(object $component): array
+    {
+        $result = [];
+
+        try {
+            foreach ((new \ReflectionClass($component))->getProperties(\ReflectionProperty::IS_PUBLIC) as $property) {
+                if ($property->isStatic()) {
+                    continue;
+                }
+
+                $name = $property->getName();
+
+                try {
+                    $value = $property->getValue($component);
+                } catch (\Throwable) {
+                    $result[$name] = '[uninitialized]';
+                    continue;
+                }
+
+                if (is_scalar($value) || $value === null) {
+                    $result[$name] = $value;
+                } elseif (is_array($value)) {
+                    $result[$name] = count($value) . ' items';
+                } else {
+                    $result[$name] = get_class($value);
+                }
+            }
+        } catch (\Throwable) {
+            // Reflection can fail on internal/anonymous classes — never surface this.
+        }
+
+        return $result;
     }
 }
