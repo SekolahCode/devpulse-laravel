@@ -126,8 +126,7 @@ class DevPulseServiceProvider extends ServiceProvider
                     }
 
                     app('devpulse')->captureException($e, $extra);
-
-                    return false; // don't prevent default reporting
+                    // Returning nothing (not false) allows Laravel's default reporting to continue.
                 });
             }
         );
@@ -297,8 +296,10 @@ class DevPulseServiceProvider extends ServiceProvider
             }
 
             // Redact values of options whose names suggest sensitive data.
+            // Covers --password, --pwd, --pass, --passwd, --secret, --token,
+            // --key, --auth, --api-key, --private, and space-separated variants.
             $safeInput = preg_replace(
-                '/(--(?:password|passwd|secret|token|key|auth|api[_-]?key|private)[^=\s]*=)\S+/i',
+                '/(--(?:password|pwd|pass|passwd|secret|token|key|auth|api[_-]?key|private)[^=\s]*(?:=|\s+))\S+/i',
                 '$1[REDACTED]',
                 (string) $event->input
             );

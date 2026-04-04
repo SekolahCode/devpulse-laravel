@@ -1,5 +1,6 @@
 {
   "name": "devpulse/laravel",
+  "version": "2.0.0",
   "description": "DevPulse Laravel SDK — auto error capture for Laravel apps",
   "type": "library",
   "license": "MIT",
