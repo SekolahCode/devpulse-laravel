@@ -2,6 +2,8 @@
 
 Real-time error tracking for Laravel — self-hosted and free.
 
+Requires a running **DevPulse server v1.0+** and PHP 8.1+.
+
 ## Installation
 
 ```bash
@@ -19,7 +21,7 @@ php artisan vendor:publish --tag=devpulse-config
 Add to `.env`:
 
 ```env
-DEVPULSE_DSN=https://your-devpulse-server.com/api/ingest/your-api-key
+DEVPULSE_DSN=https://your-devpulse-host/api/ingest/YOUR_API_KEY
 DEVPULSE_ENV=production
 DEVPULSE_RELEASE=1.4.2        # or set APP_VERSION — falls back to git SHA
 ```
