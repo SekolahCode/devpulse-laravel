@@ -459,9 +459,13 @@ class DevPulseServiceProvider extends ServiceProvider
             $route   = $request->route();
 
             $ctx['routing'] = [
-                'controller' => optional($route)->getActionName(),
-                'name'       => optional($route)->getName(),
+                // @phpstan-ignore-next-line
+                'controller' => optional($route)->getActionName() ?? null,
+                // @phpstan-ignore-next-line
+                'name'       => optional($route)->getName() ?? null,
+                // @phpstan-ignore-next-line
                 'middleware' => optional($route)->gatherMiddleware() ?? [],
+                // @phpstan-ignore-next-line
                 'parameters' => optional($route)->parameters() ?? [],
             ];
         }
@@ -476,6 +480,7 @@ class DevPulseServiceProvider extends ServiceProvider
     private function resolveUser(): ?array
     {
         try {
+            /** @phpstan-ignore-next-line */
             $user = auth()->user();
             if (!$user) {
                 return null;

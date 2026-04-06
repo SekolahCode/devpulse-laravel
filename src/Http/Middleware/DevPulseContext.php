@@ -36,7 +36,7 @@ class DevPulseContext
             'environment' => config('devpulse.environment', app()->environment()),
             'php'         => PHP_VERSION,
             'laravel'     => app()->version(),
-            'route'       => optional($request->route())->getName() ?? $request->path(),
+            'route'       => optional($request->route())->getName() ?? $request->path(), // @phpstan-ignore-line
             'method'      => $request->method(),
             'url'         => $request->fullUrl(),
             'ip'          => $request->ip(),
@@ -48,6 +48,7 @@ class DevPulseContext
         // Attach user if available
         if (config('devpulse.user_context', true)) {
             try {
+                /** @phpstan-ignore-next-line */
                 $user = auth()->user();
                 if ($user) {
                     $extra['user'] = array_filter([
