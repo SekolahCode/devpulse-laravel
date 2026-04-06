@@ -186,7 +186,7 @@ class DevPulseServiceProvider extends ServiceProvider
 
     private function registerQueueFailureCapture(array $config): void
     {
-        Queue::failing(function ($event) use ($config) {
+        Queue::failing(function ($event) {
             app('devpulse')->captureException($event->exception, array_merge(
                 $this->buildBaseContext(),
                 [
@@ -336,6 +336,7 @@ class DevPulseServiceProvider extends ServiceProvider
         }
 
         // Guard: Livewire's ServiceProvider must have booted (Octane / test safety).
+        /** @phpstan-ignore-next-line */
         if (!app()->bound(\Livewire\Mechanisms\ComponentRegistry::class)) {
             return;
         }
