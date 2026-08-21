@@ -452,4 +452,86 @@ class CaptureTest extends TestCase
 
         $this->report(new \RuntimeException('second request'));
     }
+
+    // ── QueryException binding redaction ──────────────────────────────────
+    //
+    // Illuminate\Database\QueryException::formatMessage() substitutes every
+    // binding directly into the SQL and bakes the result into the exception's
+    // own ->getMessage() *before* this SDK ever sees it — the redaction in
+    // registerSlowQueryCapture() never runs for a thrown QueryException, only
+    // for the deliberate "slow query" report it builds itself. A query that
+    // binds a large JSON blob as a single parameter (e.g. Laravel Telescope
+    // storing a full request/session snapshot) leaks that blob verbatim into
+    // the captured exception if this isn't redacted first.
+
+    public function test_query_exception_bindings_are_redacted(): void
+    {
+        $client = $this->bootWith(['devpulse.capture.commands' => false]);
+
+        $sensitiveBlob = json_encode(['bb_auth_access_token' => 'super-secret-jwt-token']);
+        $driverError   = new \PDOException("SQLSTATE[HY000] [1045] Access denied for user 'support'@'localhost' (using password: YES)");
+        $queryException = new \Illuminate\Database\QueryException(
+            'mysql',
+            'insert into `telescope_entries` (`content`) values (?)',
+            [$sensitiveBlob],
+            $driverError
+        );
+
+        // Laravel already baked the secret into the exception's own message
+        // by this point — confirms the test is exercising the real leak path.
+        $this->assertStringContainsString('super-secret-jwt-token', $queryException->getMessage());
+
+        $client->expects($this->once())
+            ->method('captureException')
+            ->with(
+                $this->callback(function (\Throwable $sent) {
+                    return !str_contains($sent->getMessage(), 'super-secret-jwt-token')
+                        && str_contains($sent->getMessage(), 'Access denied for user')
+                        && str_contains($sent->getMessage(), 'Connection: mysql');
+                }),
+                $this->anything()
+            );
+
+        $this->report($queryException);
+    }
+
+    public function test_query_exception_redaction_does_not_mutate_the_original_exception(): void
+    {
+        // registerCommandCapture/registerQueueFailureCapture's own logic, and
+        // Laravel's default exception logging, may still run against the
+        // original exception object after our reportable callback returns —
+        // safeThrowable() must redact a clone, never the exception in place.
+        $client = $this->bootWith(['devpulse.capture.commands' => false]);
+        $client->method('captureException')->willReturn(true);
+
+        $sensitiveBlob   = json_encode(['token' => 'super-secret-jwt-token']);
+        $driverError     = new \PDOException('SQLSTATE[HY000] some driver error');
+        $queryException  = new \Illuminate\Database\QueryException(
+            'mysql',
+            'insert into `x` (`content`) values (?)',
+            [$sensitiveBlob],
+            $driverError
+        );
+
+        $this->report($queryException);
+
+        $this->assertStringContainsString(
+            'super-secret-jwt-token',
+            $queryException->getMessage(),
+            'The original exception object must be left untouched — only the clone sent to DevPulse should be redacted.'
+        );
+    }
+
+    public function test_non_query_exceptions_are_not_altered(): void
+    {
+        $client = $this->bootWith(['devpulse.capture.commands' => false]);
+
+        $original = new \RuntimeException('plain error, nothing to redact');
+
+        $client->expects($this->once())
+            ->method('captureException')
+            ->with($this->identicalTo($original), $this->anything());
+
+        $this->report($original);
+    }
 }

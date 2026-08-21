@@ -7,9 +7,11 @@ use DevPulse\Laravel\Console\Commands\ReleaseCommand;
 use DevPulse\Laravel\Console\Commands\TestCommand;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Str;
 use Throwable;
 
 class DevPulseServiceProvider extends ServiceProvider
@@ -137,7 +139,7 @@ class DevPulseServiceProvider extends ServiceProvider
                     // (DevPulse::addBreadcrumb()/setTag()/setContext()).
                     $extra = $this->store()->applyTo($extra);
 
-                    app('devpulse')->captureException($e, $extra);
+                    app('devpulse')->captureException($this->safeThrowable($e), $extra);
                     // Returning nothing (not false) allows Laravel's default reporting to continue.
                 });
             }
@@ -193,7 +195,7 @@ class DevPulseServiceProvider extends ServiceProvider
     private function registerQueueFailureCapture(array $config): void
     {
         Queue::failing(function ($event) {
-            app('devpulse')->captureException($event->exception, array_merge(
+            app('devpulse')->captureException($this->safeThrowable($event->exception), array_merge(
                 $this->buildBaseContext(),
                 [
                     'queue'      => $event->job->getQueue(),
@@ -316,7 +318,7 @@ class DevPulseServiceProvider extends ServiceProvider
 
             if ($lastException !== null) {
                 // Capture with full exception details + command context
-                app('devpulse')->captureException($lastException, $context);
+                app('devpulse')->captureException($this->safeThrowable($lastException), $context);
             } else {
                 // Non-exception failure (e.g. return Command::FAILURE)
                 app('devpulse')->captureMessage(
@@ -423,6 +425,66 @@ class DevPulseServiceProvider extends ServiceProvider
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Laravel's own QueryException::formatMessage() substitutes every binding
+     * directly into the SQL and bakes the result into the exception's message
+     * property — before this SDK ever sees it. That means ->getMessage() on
+     * a QueryException can already contain real bound values: passwords,
+     * tokens, full session/request blobs a package like Telescope inserts as
+     * a single JSON-encoded parameter, anything. The dedicated redaction in
+     * registerSlowQueryCapture() only covers the deliberate "slow query"
+     * report it builds itself — it never sees a thrown QueryException's
+     * already-formatted message, so it does nothing here.
+     *
+     * Rebuilds a safe message from the exception's own accessors (the
+     * original driver error, connection name, and the SQL with bindings
+     * redacted the same way registerSlowQueryCapture() does), then wraps it
+     * in a plain \Exception rather than mutating the original — Laravel's
+     * own default logging may still process the original object after this
+     * reportable callback returns, and it should keep full detail. A plain
+     * \Exception is used (not a clone) because QueryException extends
+     * PDOException, which PHP does not allow cloning at all ("Trying to
+     * clone an uncloneable object"). file/line/trace are copied via
+     * reflection so the stack trace captured in the dashboard still points
+     * at the real query call site rather than here. Non-QueryException
+     * throwables pass through unchanged.
+     */
+    private function safeThrowable(Throwable $e): Throwable
+    {
+        if (!$e instanceof QueryException) {
+            return $e;
+        }
+
+        // Str::replaceArray() wants a list of strings — redacted string bindings
+        // become the literal '?' (indistinguishable from an unfilled placeholder,
+        // which is the point); everything else is cast to its string form so a
+        // numeric ID or bool stays useful for debugging without leaking anything.
+        $safeBindings = array_map(
+            fn ($v) => is_string($v) ? '?' : (string) ($v ?? 'NULL'),
+            $e->getBindings()
+        );
+
+        $safeSql = Str::replaceArray('?', $safeBindings, $e->getSql());
+
+        $driverMessage = $e->getPrevious()?->getMessage() ?? 'Query error';
+
+        $safeMessage = "{$driverMessage} (Connection: {$e->getConnectionName()}, SQL: {$safeSql})";
+
+        $safe = new \Exception($safeMessage, $e->getCode());
+
+        foreach ([
+            'file'  => $e->getFile(),
+            'line'  => $e->getLine(),
+            'trace' => $e->getTrace(),
+        ] as $property => $value) {
+            $reflection = new \ReflectionProperty(\Exception::class, $property);
+            $reflection->setAccessible(true);
+            $reflection->setValue($safe, $value);
+        }
+
+        return $safe;
+    }
 
     /**
      * Build context sent with every event: release, env, Laravel/PHP versions.
