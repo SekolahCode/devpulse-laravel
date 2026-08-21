@@ -241,12 +241,18 @@ class CaptureTest extends TestCase
 
     // ── Command capture ───────────────────────────────────────────────────
 
+    /**
+     * A real StringInput rather than a mocked InputInterface — PHPUnit's
+     * mock generator configuring __toString() behaves differently across
+     * the 10.x/11.x versions this package's CI matrix covers (10.5 refuses
+     * to configure it at all: "does not exist, has not been specified, is
+     * final, or is static"). A concrete Symfony object sidesteps that
+     * entirely and StringInput::__toString() reconstructs quoted values
+     * faithfully enough for the redaction tests below.
+     */
     private function input(string $asString): InputInterface
     {
-        $input = $this->createMock(InputInterface::class);
-        $input->method('__toString')->willReturn($asString);
-
-        return $input;
+        return new \Symfony\Component\Console\Input\StringInput($asString);
     }
 
     public function test_non_zero_exit_without_exception_captures_a_message(): void
