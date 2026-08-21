@@ -3,10 +3,11 @@
 namespace DevPulse\Laravel;
 
 use DevPulse\Client;
+use DevPulse\Laravel\Console\Commands\ReleaseCommand;
+use DevPulse\Laravel\Console\Commands\TestCommand;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\ServiceProvider;
 use Throwable;
@@ -29,6 +30,17 @@ class DevPulseServiceProvider extends ServiceProvider
                 'timeout' => (int) ($config['timeout'] ?? 2),
             ]);
         });
+
+        // Scoped (not a plain singleton): Octane calls Container::forgetScopedInstances()
+        // at the request boundary, so the next app(ContextStore::class) resolution
+        // gets a fresh, empty store automatically. Every listener below MUST resolve
+        // this fresh each time it fires rather than capturing one instance up front —
+        // see ContextStore's docblock.
+        $this->app->scoped(ContextStore::class, function ($app) {
+            $maxCrumbs = (int) ($app['config']['devpulse']['breadcrumbs']['max'] ?? 20);
+
+            return new ContextStore($maxCrumbs);
+        });
     }
 
     public function boot(): void
@@ -37,6 +49,11 @@ class DevPulseServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__ . '/../config/devpulse.php' => config_path('devpulse.php'),
             ], 'devpulse-config');
+
+            $this->commands([
+                ReleaseCommand::class,
+                TestCommand::class,
+            ]);
         }
 
         $config = $this->app['config']['devpulse'];
@@ -45,16 +62,12 @@ class DevPulseServiceProvider extends ServiceProvider
             return;
         }
 
-        // Breadcrumb buffer (shared across listeners for this request)
-        $breadcrumbs     = [];
-        $livewireContext = [];
-
         if ($config['capture']['exceptions'] ?? true) {
-            $this->registerExceptionCapture($config, $breadcrumbs, $livewireContext);
+            $this->registerExceptionCapture($config);
         }
 
         if ($config['capture']['slow_queries'] ?? true) {
-            $this->registerSlowQueryCapture($config, $breadcrumbs);
+            $this->registerSlowQueryCapture($config);
         }
 
         if ($config['capture']['queue_failures'] ?? true) {
@@ -62,7 +75,7 @@ class DevPulseServiceProvider extends ServiceProvider
         }
 
         if ($config['capture']['logs'] ?? true) {
-            $this->registerLogCapture($config, $breadcrumbs);
+            $this->registerLogCapture($config);
         }
 
         if ($config['capture']['commands'] ?? true) {
@@ -70,24 +83,29 @@ class DevPulseServiceProvider extends ServiceProvider
         }
 
         if ($config['capture']['livewire'] ?? true) {
-            $this->registerLivewireCapture($config, $breadcrumbs, $livewireContext);
+            $this->registerLivewireCapture($config);
         }
+    }
+
+    /** Resolve the current request's ContextStore. Always call this fresh — never cache the result. */
+    private function store(): ContextStore
+    {
+        return $this->app->make(ContextStore::class);
     }
 
     // ── Exception capture ────────────────────────────────────────────────────
 
-    private function registerExceptionCapture(array $config, array &$breadcrumbs, array &$livewireContext): void
+    private function registerExceptionCapture(array $config): void
     {
         $ignored         = $config['ignored_exceptions'] ?? [];
         $sampleRate      = (float) ($config['sample_rate'] ?? 1.0);
         $userContext     = $config['user_context'] ?? true;
         $captureCommands = $config['capture']['commands'] ?? true;
-        $maxCrumbs       = (int) ($config['breadcrumbs']['max'] ?? 20);
 
         $this->callAfterResolving(
             \Illuminate\Contracts\Debug\ExceptionHandler::class,
-            function ($handler) use ($ignored, $sampleRate, $userContext, $captureCommands, $maxCrumbs, &$breadcrumbs, &$livewireContext) {
-                $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, $captureCommands, $maxCrumbs, &$breadcrumbs, &$livewireContext) {
+            function ($handler) use ($ignored, $sampleRate, $userContext, $captureCommands) {
+                $handler->reportable(function (Throwable $e) use ($ignored, $sampleRate, $userContext, $captureCommands) {
                     // In console, registerCommandCapture handles exceptions with richer command context.
                     // Queue worker failures are covered separately by registerQueueFailureCapture.
                     // Must NOT return false here — that would stop the chain before registerCommandCapture
@@ -115,15 +133,9 @@ class DevPulseServiceProvider extends ServiceProvider
                         $extra['user'] = $this->resolveUser();
                     }
 
-                    // Breadcrumbs
-                    if (!empty($breadcrumbs)) {
-                        $extra['breadcrumbs'] = array_slice($breadcrumbs, -$maxCrumbs);
-                    }
-
-                    // Livewire component context (populated by registerLivewireCapture)
-                    if (!empty($livewireContext)) {
-                        $extra['livewire'] = $livewireContext;
-                    }
+                    // Breadcrumbs, Livewire context, and any manually-added tags/context
+                    // (DevPulse::addBreadcrumb()/setTag()/setContext()).
+                    $extra = $this->store()->applyTo($extra);
 
                     app('devpulse')->captureException($e, $extra);
                     // Returning nothing (not false) allows Laravel's default reporting to continue.
@@ -134,28 +146,22 @@ class DevPulseServiceProvider extends ServiceProvider
 
     // ── Slow query capture ───────────────────────────────────────────────────
 
-    private function registerSlowQueryCapture(array $config, array &$breadcrumbs): void
+    private function registerSlowQueryCapture(array $config): void
     {
-        $threshold    = (int) ($config['slow_query_ms'] ?? 1000);
-        $trackCrumbs  = $config['breadcrumbs']['queries'] ?? true;
-        $maxCrumbs    = (int) ($config['breadcrumbs']['max'] ?? 20);
+        $threshold   = (int) ($config['slow_query_ms'] ?? 1000);
+        $trackCrumbs = $config['breadcrumbs']['queries'] ?? true;
 
-        DB::listen(function ($query) use ($threshold, $trackCrumbs, $maxCrumbs, &$breadcrumbs) {
+        DB::listen(function ($query) use ($threshold, $trackCrumbs) {
             $ms = $query->time;
 
             // Always add to breadcrumb buffer for context on later exceptions
             if ($trackCrumbs) {
-                if (count($breadcrumbs) >= $maxCrumbs) {
-                    array_shift($breadcrumbs);
-                }
-                $breadcrumbs[] = [
-                    'type'      => 'query',
-                    'timestamp' => now()->toISOString(),
-                    'category'  => 'db',
-                    'message'   => \Illuminate\Support\Str::limit($query->sql, 200),
-                    'data'      => ['duration_ms' => $ms, 'connection' => $query->connectionName],
-                    'level'     => $ms >= $threshold ? 'warning' : 'info',
-                ];
+                $this->store()->addBreadcrumb(
+                    \Illuminate\Support\Str::limit($query->sql, 200),
+                    'db',
+                    ['duration_ms' => $ms, 'connection' => $query->connectionName],
+                    $ms >= $threshold ? 'warning' : 'info'
+                );
             }
 
             if ($ms < $threshold) {
@@ -203,32 +209,27 @@ class DevPulseServiceProvider extends ServiceProvider
 
     // ── Log capture (error + critical) ───────────────────────────────────────
 
-    private function registerLogCapture(array $config, array &$breadcrumbs): void
+    private function registerLogCapture(array $config): void
     {
         $minLevel    = $config['min_log_level'] ?? 'error';
         $trackCrumbs = $config['breadcrumbs']['logs'] ?? true;
-        $maxCrumbs   = (int) ($config['breadcrumbs']['max'] ?? 20);
 
         $levels = ['debug', 'info', 'notice', 'warning', 'error', 'critical', 'alert', 'emergency'];
         $minIdx = array_search($minLevel, $levels, true);
 
         \Illuminate\Support\Facades\Event::listen(
             \Illuminate\Log\Events\MessageLogged::class,
-            function ($event) use ($levels, $minIdx, $trackCrumbs, $maxCrumbs, &$breadcrumbs) {
+            function ($event) use ($levels, $minIdx, $trackCrumbs) {
                 $idx = array_search($event->level, $levels, true);
 
                 // Add to breadcrumbs regardless of min level
                 if ($trackCrumbs) {
-                    if (count($breadcrumbs) >= $maxCrumbs) {
-                        array_shift($breadcrumbs);
-                    }
-                    $breadcrumbs[] = [
-                        'type'      => 'log',
-                        'timestamp' => now()->toISOString(),
-                        'category'  => 'log',
-                        'message'   => \Illuminate\Support\Str::limit($event->message, 200),
-                        'level'     => $event->level,
-                    ];
+                    $this->store()->addBreadcrumb(
+                        \Illuminate\Support\Str::limit($event->message, 200),
+                        'log',
+                        [],
+                        $event->level
+                    );
                 }
 
                 if ($idx === false || $idx < $minIdx) {
@@ -298,8 +299,11 @@ class DevPulseServiceProvider extends ServiceProvider
             // Redact values of options whose names suggest sensitive data.
             // Covers --password, --pwd, --pass, --passwd, --secret, --token,
             // --key, --auth, --api-key, --private, and space-separated variants.
+            // The value alternation tries a quoted string first so secrets
+            // containing spaces (e.g. --password="hunter 2") are redacted in
+            // full instead of leaking everything after the first space.
             $safeInput = preg_replace(
-                '/(--(?:password|pwd|pass|passwd|secret|token|key|auth|api[_-]?key|private)[^=\s]*(?:=|\s+))\S+/i',
+                '/(--(?:password|pwd|pass|passwd|secret|token|key|auth|api[_-]?key|private)[^=\s]*(?:=|\s+))(?:"[^"]*"|\'[^\']*\'|\S+)/i',
                 '$1[REDACTED]',
                 (string) $event->input
             );
@@ -328,7 +332,7 @@ class DevPulseServiceProvider extends ServiceProvider
 
     // ── Livewire component capture ───────────────────────────────────────────
 
-    private function registerLivewireCapture(array $config, array &$breadcrumbs, array &$livewireContext): void
+    private function registerLivewireCapture(array $config): void
     {
         // Livewire is an optional peer dependency — skip silently if absent.
         if (!class_exists(\Livewire\Livewire::class)) {
@@ -343,38 +347,37 @@ class DevPulseServiceProvider extends ServiceProvider
 
         $threshold   = (int) ($config['slow_livewire_ms'] ?? 500);
         $trackCrumbs = $config['breadcrumbs']['livewire'] ?? true;
-        $maxCrumbs   = (int) ($config['breadcrumbs']['max'] ?? 20);
 
         /** @var array<string, float> $actionTimers  key = "{componentId}::{action}" */
         $actionTimers = [];
 
         // Populate context on AJAX updates (component.hydrate).
-        \Livewire\Livewire::listen('component.hydrate', function ($component) use (&$livewireContext): void {
-            $livewireContext['livewire_component'] = $component->getName();
-            $livewireContext['livewire_id']        = $component->getId();
+        \Livewire\Livewire::listen('component.hydrate', function ($component): void {
+            $this->store()->setLivewire('livewire_component', $component->getName());
+            $this->store()->setLivewire('livewire_id', $component->getId());
         });
 
         // Populate context on initial full-page renders (component.mount).
-        \Livewire\Livewire::listen('component.mount', function ($component) use (&$livewireContext): void {
-            $livewireContext['livewire_component'] = $component->getName();
-            $livewireContext['livewire_id']        = $component->getId();
+        \Livewire\Livewire::listen('component.mount', function ($component): void {
+            $this->store()->setLivewire('livewire_component', $component->getName());
+            $this->store()->setLivewire('livewire_id', $component->getId());
         });
 
         // Record action start time and set action name in shared context.
         // If action.finish never fires (exception mid-action), livewire_action remains
-        // in $livewireContext so the exception handler can include it automatically.
-        \Livewire\Livewire::listen('action.start', function ($component, $action) use (&$livewireContext, &$actionTimers): void {
+        // in the store so the exception handler can include it automatically.
+        \Livewire\Livewire::listen('action.start', function ($component, $action) use (&$actionTimers): void {
             // Safety valve: prevent unbounded timer growth under persistent workers (Octane).
             if (count($actionTimers) > 50) {
                 $actionTimers = [];
             }
 
             $actionTimers[$component->getId() . '::' . $action] = microtime(true);
-            $livewireContext['livewire_action'] = $action;
+            $this->store()->setLivewire('livewire_action', $action);
         });
 
         // Compute duration, record breadcrumb, and report if slow.
-        \Livewire\Livewire::listen('action.finish', function ($component, $action) use (&$livewireContext, &$actionTimers, $threshold, $trackCrumbs, $maxCrumbs, &$breadcrumbs): void {
+        \Livewire\Livewire::listen('action.finish', function ($component, $action) use (&$actionTimers, $threshold, $trackCrumbs): void {
             $key = $component->getId() . '::' . $action;
             $ms  = isset($actionTimers[$key])
                 ? (microtime(true) - $actionTimers[$key]) * 1000
@@ -383,22 +386,17 @@ class DevPulseServiceProvider extends ServiceProvider
             unset($actionTimers[$key]);
 
             if ($trackCrumbs) {
-                if (count($breadcrumbs) >= $maxCrumbs) {
-                    array_shift($breadcrumbs);
-                }
-                $breadcrumbs[] = [
-                    'type'      => 'livewire',
-                    'timestamp' => now()->toISOString(),
-                    'category'  => 'livewire',
-                    'message'   => $component->getName() . '::' . $action . '()',
-                    'data'      => array_filter([
+                $this->store()->addBreadcrumb(
+                    $component->getName() . '::' . $action . '()',
+                    'livewire',
+                    array_filter([
                         'component'   => $component->getName(),
                         'action'      => $action,
                         'id'          => $component->getId(),
                         'duration_ms' => $ms !== null ? round($ms, 2) : null,
                     ]),
-                    'level'     => ($ms !== null && $ms >= $threshold) ? 'warning' : 'info',
-                ];
+                    ($ms !== null && $ms >= $threshold) ? 'warning' : 'info'
+                );
             }
 
             if ($ms !== null && $ms >= $threshold) {
@@ -420,7 +418,7 @@ class DevPulseServiceProvider extends ServiceProvider
             }
 
             // Clear the in-flight action name now that the action completed normally.
-            unset($livewireContext['livewire_action']);
+            $this->store()->clearLivewireKey('livewire_action');
         });
     }
 
@@ -454,7 +452,7 @@ class DevPulseServiceProvider extends ServiceProvider
         // Note: 'request' key is intentionally omitted here — php-core's buildRequest()
         // owns that key and would overwrite anything set here via array_merge.
         // Routing is stored separately so it survives the merge.
-        if (app()->bound('request') && app('request')->isMethod('get') !== null) {
+        if (app()->bound('request')) {
             $request = app('request');
             $route   = $request->route();
 
@@ -499,15 +497,26 @@ class DevPulseServiceProvider extends ServiceProvider
     }
 
     /**
-     * Get the short git SHA of HEAD, if git is available.
+     * Memoized per-worker: the git SHA only changes on deploy, but this is
+     * called once per captured event, and a worker (classic or Octane) may
+     * capture many events without a new deploy in between.
      */
+    private static ?string $cachedGitSha = null;
+    private static bool $gitShaResolved = false;
+
     private function gitSha(): ?string
     {
+        if (self::$gitShaResolved) {
+            return self::$cachedGitSha;
+        }
+
+        self::$gitShaResolved = true;
+
         try {
             $sha = trim((string) shell_exec('git rev-parse --short HEAD 2>/dev/null'));
-            return !empty($sha) ? $sha : null;
+            return self::$cachedGitSha = (!empty($sha) ? $sha : null);
         } catch (Throwable) {
-            return null;
+            return self::$cachedGitSha = null;
         }
     }
 

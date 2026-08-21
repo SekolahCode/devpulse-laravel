@@ -44,6 +44,20 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Admin API (devpulse:release)
+    |--------------------------------------------------------------------------
+    | Only needed for `php artisan devpulse:release`. The releases endpoint
+    | sits behind the same admin token used to sign in to the DevPulse
+    | dashboard — it grants access to every project on your DevPulse
+    | instance, not just this one. Treat it like any other production
+    | secret. DEVPULSE_PROJECT_ID is this app's project UUID, visible in
+    | the dashboard URL (/projects/{id}/issues).
+    */
+    'admin_token' => env('DEVPULSE_ADMIN_TOKEN'),
+    'project_id'  => env('DEVPULSE_PROJECT_ID'),
+
+    /*
+    |--------------------------------------------------------------------------
     | HTTP Timeout (seconds)
     |--------------------------------------------------------------------------
     */
@@ -81,6 +95,23 @@ return [
     'slow_query_ms'    => env('DEVPULSE_SLOW_QUERY_MS',    1000),
     'slow_request_ms'  => env('DEVPULSE_SLOW_REQUEST_MS',  3000),
     'slow_livewire_ms' => env('DEVPULSE_SLOW_LIVEWIRE_MS',  500),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Slow Request Ignore List
+    |--------------------------------------------------------------------------
+    | Route names or URI patterns (Str::is() wildcards) to exclude from slow
+    | request capture — health checks and monitoring endpoints are commonly
+    | hit on a tight interval by a load balancer and don't need reporting.
+    | Matched against both the route name and the request path.
+    |
+    | Override via .env with a comma-separated list, e.g.
+    | DEVPULSE_SLOW_REQUEST_IGNORE=up,health*,_status
+    */
+    'slow_request_ignore' => array_filter(array_map(
+        'trim',
+        explode(',', (string) env('DEVPULSE_SLOW_REQUEST_IGNORE', 'up,health,health*,_health*'))
+    )),
 
     /*
     |--------------------------------------------------------------------------

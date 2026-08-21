@@ -24,6 +24,10 @@ class DevPulseContext
             return $response;
         }
 
+        if ($this->isIgnored($request)) {
+            return $response;
+        }
+
         $ms        = (microtime(true) - $start) * 1000;
         $threshold = (int) config('devpulse.slow_request_ms', 3000);
 
@@ -69,5 +73,30 @@ class DevPulseContext
         );
 
         return $response;
+    }
+
+    /**
+     * Check the request's route name and path against
+     * devpulse.slow_request_ignore (Str::is() wildcards), so health checks
+     * and monitoring endpoints hit on a tight interval don't get flagged.
+     */
+    private function isIgnored(Request $request): bool
+    {
+        $patterns = config('devpulse.slow_request_ignore', []);
+
+        if (empty($patterns)) {
+            return false;
+        }
+
+        $routeName = optional($request->route())->getName(); // @phpstan-ignore-line
+        $path      = $request->path();
+
+        foreach ($patterns as $pattern) {
+            if (($routeName && \Illuminate\Support\Str::is($pattern, $routeName)) || \Illuminate\Support\Str::is($pattern, $path)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

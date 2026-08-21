@@ -38,4 +38,34 @@ class DevPulseFacade extends Facade
         static::swap($fake);
         return $fake;
     }
+
+    /**
+     * Record a breadcrumb, attached to the next exception/message captured
+     * during this request (or Octane-scoped equivalent). Automatic
+     * breadcrumbs (queries, logs, Livewire actions) go through the same
+     * buffer, so this is safe to call as often as you like.
+     */
+    public static function addBreadcrumb(string $message, string $category = 'custom', array $data = [], string $level = 'info'): void
+    {
+        app(ContextStore::class)->addBreadcrumb($message, $category, $data, $level);
+    }
+
+    /**
+     * Attach a short, indexable tag (e.g. DevPulse::setTag('tenant', 'acme-co'))
+     * to every event captured for the rest of this request.
+     */
+    public static function setTag(string $key, string $value): void
+    {
+        app(ContextStore::class)->setTag($key, $value);
+    }
+
+    /**
+     * Attach a named group of structured context
+     * (e.g. DevPulse::setContext('checkout', ['cart_id' => 42])) to every
+     * event captured for the rest of this request.
+     */
+    public static function setContext(string $key, array $data): void
+    {
+        app(ContextStore::class)->setContext($key, $data);
+    }
 }

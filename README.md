@@ -41,6 +41,9 @@ DEVPULSE_RELEASE=1.4.2        # or set APP_VERSION — falls back to git SHA
 | `DEVPULSE_SLOW_REQUEST_MS` | `3000` | Slow request threshold (ms) |
 | `DEVPULSE_MIN_LOG_LEVEL` | `error` | Minimum log level to capture |
 | `DEVPULSE_USER_CONTEXT` | `true` | Attach auth user to events |
+| `DEVPULSE_SLOW_REQUEST_IGNORE` | `up,health,health*,_health*` | Comma-separated route names/paths to exclude from slow-request capture |
+| `DEVPULSE_ADMIN_TOKEN` | — | Only for `devpulse:release` — the dashboard admin token (see below) |
+| `DEVPULSE_PROJECT_ID` | — | Only for `devpulse:release` — this app's project UUID |
 
 ### Capture toggles
 
@@ -93,7 +96,31 @@ protected $middleware = [
 })
 ```
 
+Health checks and monitoring endpoints hit on a tight interval by a load
+balancer don't need to show up as "slow requests." Exclude them by route
+name or path (wildcards supported) via `DEVPULSE_SLOW_REQUEST_IGNORE` or the
+`slow_request_ignore` config array — `up` and `health*` are excluded by
+default.
+
 ## Manual capture
+
+Every automatic capture (queries, logs, Livewire actions) is attached to
+the same per-request breadcrumb/context buffer these methods write to —
+add your own business context anywhere in your app and it rides along with
+whatever gets captured next, for the rest of the request:
+
+```php
+use DevPulse\Laravel\DevPulseFacade as DevPulse;
+
+// Breadcrumbs — recent activity leading up to an error
+DevPulse::addBreadcrumb('user reached payment step', 'checkout');
+
+// Tags — short, indexable key/value pairs
+DevPulse::setTag('tenant', $tenant->slug);
+
+// Context — a named group of structured data
+DevPulse::setContext('checkout', ['cart_id' => $cart->id, 'total' => $cart->total]);
+```
 
 ```php
 use DevPulse\Laravel\DevPulseFacade as DevPulse;
@@ -113,6 +140,36 @@ DevPulse::captureMessage('Payment gateway timeout', 'warning', [
     'customer_id' => $customerId,
 ]);
 ```
+
+## Artisan commands
+
+### `devpulse:test`
+
+Sends a real test event through your configured DSN, so you can confirm the
+connection works before waiting for a real error:
+
+```bash
+php artisan devpulse:test
+```
+
+### `devpulse:release`
+
+Registers a release with your DevPulse server so it shows up on the
+project's Releases timeline — run it as part of your deploy pipeline:
+
+```bash
+php artisan devpulse:release 1.4.2 --ref=$(git rev-parse HEAD) --url=https://ci.example.com/builds/123
+```
+
+This needs two extra values beyond the DSN: `DEVPULSE_PROJECT_ID` (this
+app's project UUID, visible in the dashboard URL) and `DEVPULSE_ADMIN_TOKEN`.
+
+**`DEVPULSE_ADMIN_TOKEN` is a more sensitive credential than your DSN.** The
+DSN's API key can only submit events for one project; the admin token is the
+same one used to sign in to the DevPulse dashboard and grants access to
+every project on your DevPulse instance. Treat it like any other
+production secret — scope who can read the `.env` it lives in, don't commit
+it, rotate it like you would any other admin credential.
 
 ## Testing
 

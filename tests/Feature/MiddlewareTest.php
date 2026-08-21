@@ -126,4 +126,50 @@ class MiddlewareTest extends TestCase
 
         $this->runMiddleware();
     }
+
+    // ── Ignore list ────────────────────────────────────────────────────────
+
+    public function test_ignored_path_is_never_captured_even_when_slow(): void
+    {
+        $client = $this->mockClient();
+        $client->expects($this->never())->method('captureMessage');
+
+        config([
+            'devpulse.slow_request_ms'     => 0,
+            'devpulse.slow_request_ignore' => ['up', 'health*'],
+        ]);
+
+        $this->runMiddleware(Request::create('/health-check'));
+    }
+
+    public function test_ignored_route_name_is_never_captured_even_when_slow(): void
+    {
+        $client = $this->mockClient();
+        $client->expects($this->never())->method('captureMessage');
+
+        config([
+            'devpulse.slow_request_ms'     => 0,
+            'devpulse.slow_request_ignore' => ['telescope*'],
+        ]);
+
+        $request = Request::create('/telescope-requests');
+        $request->setRouteResolver(fn () => new class {
+            public function getName() { return 'telescope.requests'; }
+        });
+
+        $this->runMiddleware($request);
+    }
+
+    public function test_non_ignored_path_still_captures_when_slow(): void
+    {
+        $client = $this->mockClient();
+        $client->expects($this->once())->method('captureMessage');
+
+        config([
+            'devpulse.slow_request_ms'     => 0,
+            'devpulse.slow_request_ignore' => ['up', 'health*'],
+        ]);
+
+        $this->runMiddleware(Request::create('/api/users'));
+    }
 }
